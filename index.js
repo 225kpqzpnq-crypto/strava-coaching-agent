@@ -135,52 +135,73 @@ async function getCoachingResponse(userText) {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
-// Strava webhook via Composio
-app.post(
-  `/webhook/strava/${process.env.COMPOSIO_WEBHOOK_SECRET}`,
-  async (req, res) => {
-    res.sendStatus(200); // ack immediately
+// Strava webhook — GET for subscription verification challenge
+app.get('/webhook/strava', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
 
-    try {
-      const payload = req.body;
-      // Composio wraps the event; drill into the actual Strava activity data
-      const activity =
-        payload?.data?.activity ||
-        payload?.activity ||
-        payload;
-
-      const stravaId =
-        activity?.id ||
-        activity?.object_id ||
-        payload?.object_id;
-
-      if (!stravaId) {
-        console.warn('[strava] no strava_id found in payload keys:', Object.keys(payload));
-        return;
-      }
-
-      const { error } = await supabase.from('activities').upsert(
-        {
-          strava_id: Number(stravaId),
-          type: activity.type || activity.sport_type || null,
-          distance_m: activity.distance || null,
-          moving_time_s: activity.moving_time || null,
-          started_at: activity.start_date || null,
-          raw: payload,
-        },
-        { onConflict: 'strava_id' }
-      );
-
-      if (error) {
-        console.error('[strava] upsert error:', error.message);
-      } else {
-        console.log('[strava] upserted activity', stravaId);
-      }
-    } catch (err) {
-      console.error('[strava] handler error:', err.message);
-    }
+  if (mode === 'subscribe' && token === process.env.STRAVA_VERIFY_TOKEN) {
+    console.log('[strava] webhook verified');
+    return res.json({ 'hub.challenge': challenge });
   }
-);
+  res.sendStatus(403);
+});
+
+// Strava webhook — POST for activity events
+app.post('/webhook/strava', async (req, res) => {
+  res.sendStatus(200); // ack immediately — Strava expects fast response
+
+  try {
+    const event = req.body;
+    // Only process activity create/update events
+    if (event.object_type !== 'activity') return;
+    if (!['create', 'update'].includes(event.aspect_type)) return;
+
+    const stravaId = event.object_id;
+    if (!stravaId) return;
+
+    // Fetch full activity details from Strava using the athlete's access token
+    const { data: tokenRow } = await supabase
+      .from('strava_tokens')
+      .select('access_token')
+      .eq('athlete_id', event.owner_id)
+      .single();
+
+    let activity = { id: stravaId, type: null, distance: null, moving_time: null, start_date: null };
+
+    if (tokenRow?.access_token) {
+      const actRes = await fetch(`https://www.strava.com/api/v3/activities/${stravaId}`, {
+        headers: { Authorization: `Bearer ${tokenRow.access_token}` },
+      });
+      if (actRes.ok) {
+        activity = await actRes.json();
+      } else {
+        console.warn('[strava] could not fetch activity detail, storing event stub');
+      }
+    }
+
+    const { error } = await supabase.from('activities').upsert(
+      {
+        strava_id: Number(stravaId),
+        type: activity.type || activity.sport_type || null,
+        distance_m: activity.distance || null,
+        moving_time_s: activity.moving_time || null,
+        started_at: activity.start_date || null,
+        raw: event,
+      },
+      { onConflict: 'strava_id' }
+    );
+
+    if (error) {
+      console.error('[strava] upsert error:', error.message);
+    } else {
+      console.log('[strava] upserted activity', stravaId, activity.type || '');
+    }
+  } catch (err) {
+    console.error('[strava] handler error:', err.message);
+  }
+});
 
 // Telegram webhook
 app.post('/webhook/telegram', async (req, res) => {
@@ -206,6 +227,51 @@ app.post('/webhook/telegram', async (req, res) => {
   } catch (err) {
     console.error('[telegram] handler error:', err.message);
   }
+});
+
+// Strava OAuth — start the auth flow
+app.get('/strava/connect', (_req, res) => {
+  const params = new URLSearchParams({
+    client_id: process.env.STRAVA_CLIENT_ID,
+    redirect_uri: `https://strava-coaching-agent.onrender.com/strava/callback`,
+    response_type: 'code',
+    approval_prompt: 'auto',
+    scope: 'activity:read_all',
+  });
+  res.redirect(`https://www.strava.com/oauth/authorize?${params}`);
+});
+
+// Strava OAuth — exchange code for tokens and store them
+app.get('/strava/callback', async (req, res) => {
+  const { code, error } = req.query;
+  if (error || !code) return res.status(400).send(`Strava auth failed: ${error || 'no code'}`);
+
+  const tokenRes = await fetch('https://www.strava.com/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_id: process.env.STRAVA_CLIENT_ID,
+      client_secret: process.env.STRAVA_CLIENT_SECRET,
+      code,
+      grant_type: 'authorization_code',
+    }),
+  });
+
+  if (!tokenRes.ok) {
+    const body = await tokenRes.text();
+    return res.status(500).send(`Token exchange failed: ${body.slice(0, 200)}`);
+  }
+
+  const token = await tokenRes.json();
+  const { error: dbErr } = await supabase.from('strava_tokens').upsert({
+    athlete_id: token.athlete.id,
+    access_token: token.access_token,
+    refresh_token: token.refresh_token,
+    expires_at: token.expires_at,
+  });
+
+  if (dbErr) return res.status(500).send(`DB error: ${dbErr.message}`);
+  res.send(`✅ Connected Strava account for ${token.athlete.firstname} ${token.athlete.lastname}. You can close this tab.`);
 });
 
 app.get('/health', (_req, res) => res.status(200).send('OK'));
