@@ -89,13 +89,19 @@ async function sendTelegram(chatId, text) {
 async function getCoachingResponse(userText) {
   const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
-  const { data: activities, error } = await supabase
-    .from('activities')
-    .select('type, distance_m, moving_time_s, started_at')
-    .gte('started_at', since)
-    .order('started_at', { ascending: false });
+  const [{ data: activities, error: actErr }, { data: notes, error: notesErr }] = await Promise.all([
+    supabase
+      .from('activities')
+      .select('type, distance_m, moving_time_s, started_at')
+      .gte('started_at', since)
+      .order('started_at', { ascending: false }),
+    supabase
+      .from('rowing_notes')
+      .select('filename, content'),
+  ]);
 
-  if (error) throw new Error(`Supabase query failed: ${error.message}`);
+  if (actErr) throw new Error(`Activities query failed: ${actErr.message}`);
+  if (notesErr) throw new Error(`Notes query failed: ${notesErr.message}`);
 
   let activitySummary = 'No activities in the last 14 days.';
   if (activities && activities.length > 0) {
@@ -114,20 +120,29 @@ async function getCoachingResponse(userText) {
       .join('\n');
   }
 
+  let notesSummary = '';
+  if (notes && notes.length > 0) {
+    notesSummary = notes
+      .map((n) => `=== ${n.filename} ===\n${n.content}`)
+      .join('\n\n');
+  }
+
   const systemPrompt =
-    'You are an expert endurance coach. Give concrete, personalized advice based ' +
-    "on the athlete's recent training. Be direct and specific. Use imperial units.";
+    'You are an expert endurance coach with full access to the athlete\'s training notes, ' +
+    'plans, logs, and recent Strava activity data. Give concrete, personalized advice. ' +
+    'Be direct and specific. Use the notes and activity data together to give accurate answers.';
+
+  const userContent = [
+    `## Recent Strava activity (last 14 days)\n${activitySummary}`,
+    notesSummary ? `## Athlete training notes & plans\n${notesSummary}` : '',
+    `## Athlete question\n${userText}`,
+  ].filter(Boolean).join('\n\n');
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
+    max_tokens: 2048,
     system: systemPrompt,
-    messages: [
-      {
-        role: 'user',
-        content: `Recent training (last 14 days):\n${activitySummary}\n\nAthlete: ${userText}`,
-      },
-    ],
+    messages: [{ role: 'user', content: userContent }],
   });
 
   return message.content[0].text;
