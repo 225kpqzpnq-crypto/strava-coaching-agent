@@ -104,59 +104,38 @@ const KNOWN_FILES = [
 ];
 
 async function logDebrief(rawText) {
-  // Ask Claude to pick the right file and format the entry
+  const filename = 'quick_debrief.md';
   const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
   const formatMsg = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
-    system: 'You are a rowing training log assistant. Format debrief notes as clean markdown entries and pick the most appropriate file to append to.',
+    max_tokens: 512,
+    system: 'You are a rowing training log assistant. Format debrief notes as clean markdown entries.',
     messages: [{
       role: 'user',
-      content: `Today is ${today}.
-
-The athlete sent this debrief:\n"${rawText}"
-
-Available files:\n${KNOWN_FILES.join('\n')}
-
-Reply with ONLY valid JSON in this exact shape:
-{
-  "filename": "<one filename from the list above>",
-  "entry": "<formatted markdown entry starting with a ## heading including the date>"
-}`,
+      content: `Today is ${today}. Format this debrief as a markdown entry with a ## heading that includes the date. Return only the markdown, no extra commentary.\n\n"${rawText}"`,
     }],
   });
 
-  let filename, entry;
-  try {
-    const raw = formatMsg.content[0].text.replace(/```json|```/g, '').trim();
-    ({ filename, entry } = JSON.parse(raw));
-    if (!KNOWN_FILES.includes(filename)) throw new Error('unknown file');
-  } catch (e) {
-    console.error('[debrief] parse error:', e.message, formatMsg.content[0].text.slice(0, 200));
-    return 'Sorry, I could not format that debrief. Try again.';
-  }
+  const entry = formatMsg.content[0].text.trim();
 
-  // Fetch current content
-  const { data: row, error: fetchErr } = await supabase
+  const { data: row } = await supabase
     .from('rowing_notes')
     .select('content')
     .eq('filename', filename)
-    .single();
+    .maybeSingle();
 
-  if (fetchErr) return `Could not read ${filename}: ${fetchErr.message}`;
-
-  const updatedContent = (row.content || '') + '\n\n' + entry;
+  const updatedContent = (row?.content || '') + '\n\n' + entry;
   const now = new Date().toISOString();
 
-  const { error: upsertErr } = await supabase
+  const { error } = await supabase
     .from('rowing_notes')
     .upsert({ filename, content: updatedContent, last_synced: now, server_updated_at: now }, { onConflict: 'filename' });
 
-  if (upsertErr) return `Failed to save debrief: ${upsertErr.message}`;
+  if (error) return `Failed to save debrief: ${error.message}`;
 
-  console.log(`[debrief] appended to ${filename}`);
-  return `✅ Logged to *${filename}*\n\n${entry}`;
+  console.log('[debrief] appended to quick_debrief.md');
+  return `✅ Logged to *quick_debrief.md*\n\n${entry}`;
 }
 
 async function getCoachingResponse(userText) {

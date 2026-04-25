@@ -26,6 +26,7 @@ const FILES = [
   'Rowing MOC.md',
   'context_prompt.md',
   'SCCBC_Easter_Holiday_Training_2026.md',
+  'quick_debrief.md',
 ];
 
 async function ensureTable() {
@@ -67,7 +68,7 @@ async function main() {
       const lastSynced = new Date(row.last_synced);
 
       if (serverUpdated > lastSynced) {
-        fs.writeFileSync(filepath, row.content, 'utf8');
+        fs.writeFileSync(filepath, row.content ?? '', 'utf8');
         console.log(`[sync] pulled ${filename} (server debrief added)`);
         pulled++;
         // Now push back to mark last_synced, clearing the server_updated_at priority
