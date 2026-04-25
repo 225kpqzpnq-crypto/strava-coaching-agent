@@ -25,14 +25,25 @@ async function runMigration() {
     path.join(__dirname, 'migrations', '001_create_activities.sql'),
     'utf8'
   );
-  const { error } = await supabase.rpc('exec_sql', { sql }).maybeSingle();
-  // exec_sql RPC may not exist; fall back to a raw query via the REST API
-  if (error) {
-    // The Supabase JS client doesn't expose raw DDL directly.
-    // We use the management REST endpoint instead — if SUPABASE_SERVICE_KEY is
-    // the service_role JWT the table will already exist from the migration file;
-    // skip and continue.
-    console.log('[migration] skipped (table may already exist or exec_sql RPC unavailable)');
+  // Supabase exposes a raw SQL endpoint for service-role keys at /rest/v1/sql
+  const res = await fetch(`${process.env.SUPABASE_URL}/rest/v1/sql`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+      'apikey': process.env.SUPABASE_SERVICE_KEY,
+    },
+    body: JSON.stringify({ query: sql }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    // If it's just a "already exists" error that's fine
+    if (body.includes('already exists')) {
+      console.log('[migration] activities table already exists');
+    } else {
+      console.warn('[migration] SQL endpoint returned', res.status, body.slice(0, 200));
+      console.warn('[migration] Run migrations/001_create_activities.sql manually in your Supabase SQL editor if the table does not exist');
+    }
   } else {
     console.log('[migration] activities table ready');
   }
