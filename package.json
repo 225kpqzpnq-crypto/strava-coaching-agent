@@ -1,0 +1,16 @@
+{
+  "name": "strava-coaching-agent",
+  "version": "1.0.0",
+  "description": "Personal AI coaching agent: Strava → Supabase → Claude → Telegram",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "@composio/core": "^0.3.4",
+    "@supabase/supabase-js": "^2.49.4",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2"
+  }
+}
