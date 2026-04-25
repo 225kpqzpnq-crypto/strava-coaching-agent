@@ -130,7 +130,7 @@ async function logDebrief(rawText) {
 
   const { error } = await supabase
     .from('rowing_notes')
-    .upsert({ filename, content: updatedContent, last_synced: now, server_updated_at: now }, { onConflict: 'filename' });
+    .upsert({ filename, content: updatedContent, server_updated_at: now }, { onConflict: 'filename' });
 
   if (error) return `Failed to save debrief: ${error.message}`;
 
