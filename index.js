@@ -86,6 +86,79 @@ async function sendTelegram(chatId, text) {
 
 // ── Coaching ──────────────────────────────────────────────────────────────────
 
+const KNOWN_FILES = [
+  'Training_log_Apr_2026.md',
+  'Training_log_Mar_2026.md',
+  'Training_plan_April_2026.md',
+  'training_plan_march.md',
+  'season_overview_to_june.md',
+  'water_sessions_log.md',
+  'runs_log.md',
+  'back_injury_log.md',
+  'squad_benchmarks.md',
+  'Races.md',
+  'Technique_feedback.md',
+  'Rowing MOC.md',
+  'context_prompt.md',
+  'SCCBC_Easter_Holiday_Training_2026.md',
+];
+
+async function logDebrief(rawText) {
+  // Ask Claude to pick the right file and format the entry
+  const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+  const formatMsg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    system: 'You are a rowing training log assistant. Format debrief notes as clean markdown entries and pick the most appropriate file to append to.',
+    messages: [{
+      role: 'user',
+      content: `Today is ${today}.
+
+The athlete sent this debrief:\n"${rawText}"
+
+Available files:\n${KNOWN_FILES.join('\n')}
+
+Reply with ONLY valid JSON in this exact shape:
+{
+  "filename": "<one filename from the list above>",
+  "entry": "<formatted markdown entry starting with a ## heading including the date>"
+}`,
+    }],
+  });
+
+  let filename, entry;
+  try {
+    const raw = formatMsg.content[0].text.replace(/```json|```/g, '').trim();
+    ({ filename, entry } = JSON.parse(raw));
+    if (!KNOWN_FILES.includes(filename)) throw new Error('unknown file');
+  } catch (e) {
+    console.error('[debrief] parse error:', e.message, formatMsg.content[0].text.slice(0, 200));
+    return 'Sorry, I could not format that debrief. Try again.';
+  }
+
+  // Fetch current content
+  const { data: row, error: fetchErr } = await supabase
+    .from('rowing_notes')
+    .select('content')
+    .eq('filename', filename)
+    .single();
+
+  if (fetchErr) return `Could not read ${filename}: ${fetchErr.message}`;
+
+  const updatedContent = (row.content || '') + '\n\n' + entry;
+  const now = new Date().toISOString();
+
+  const { error: upsertErr } = await supabase
+    .from('rowing_notes')
+    .upsert({ filename, content: updatedContent, last_synced: now, server_updated_at: now }, { onConflict: 'filename' });
+
+  if (upsertErr) return `Failed to save debrief: ${upsertErr.message}`;
+
+  console.log(`[debrief] appended to ${filename}`);
+  return `✅ Logged to *${filename}*\n\n${entry}`;
+}
+
 async function getCoachingResponse(userText) {
   const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -237,7 +310,9 @@ app.post('/webhook/telegram', async (req, res) => {
     const text = message.text;
     if (!text) return;
 
-    const reply = await getCoachingResponse(text);
+    const reply = text.trimStart().startsWith('/log ')
+      ? await logDebrief(text.slice(text.indexOf(' ') + 1).trim())
+      : await getCoachingResponse(text);
     await sendTelegram(chatId, reply);
   } catch (err) {
     console.error('[telegram] handler error:', err.message);
